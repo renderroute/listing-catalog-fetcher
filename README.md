@@ -14,8 +14,9 @@ arrive only in the runtime dispatch payload from a private orchestrator.
    - `repository_dispatch` type `fetch-listings` with `client_payload.stores`
    - or a JSON file passed as `--stores-json`
 2. Fetches listing pages politely (sequential, delays, retries)
-3. Optionally opens a limited number of product pages to enrich missing MPN / brand
-4. Optionally confirms missing items via product-page soft-delete checks
+3. In orchestrated runs, opens product pages only for new IDs and one-time
+   incomplete-item targets; a manual run can still use a small limit
+4. Confirms missing items via one product-page soft-delete check
 5. Writes lean JSON (`schema_version: pcpmf_listing_catalog_v1`)
 6. Optionally pushes those files to a **private** staging repository
 7. Optionally triggers a private “bridge” workflow to consume staged JSON
@@ -61,8 +62,11 @@ Store object fields (JSON):
 | `page_size_hint` | Expected items per page |
 | `min_page1_items` | Health fail if page 1 has fewer (default 10) |
 | `max_pages` | Optional hard cap |
-| `enrich_limit` | Max PDP enrich calls for items missing MPN (default 0) |
-| `confirm_missing` | Optional list of `{merchant_item_id, product_url}` to soft-delete check |
+| `enrich_mode` | `targeted` for new/incomplete orchestration; empty for listing-only manual runs |
+| `known_item_ids` | IDs already stored by the private Merchant Feeds source |
+| `enrich_item_ids` | Existing incomplete IDs whose one-time PDP check is pending |
+| `enrich_limit` | Optional cap for eligible PDP calls; `0` means all eligible targets |
+| `missing_targets` | Existing `{merchant_item_id, product_url}` rows eligible for one missing check |
 | `card_selector` | CSS selector for one product card |
 | `id_attribute` / `id_regex` | Where the stable shop item id is found |
 | `title_selectors` / `url_selectors` | Ordered CSS selector lists |

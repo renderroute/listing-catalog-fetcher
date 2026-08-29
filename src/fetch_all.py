@@ -131,6 +131,17 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
     max_pages = store.get("max_pages")
     max_pages_i = _int(max_pages, 0) if max_pages not in (None, "") else 0
     enrich_limit = _int(store.get("enrich_limit"), 0)
+    enrich_mode = str(store.get("enrich_mode") or "").strip().lower()
+    known_item_ids = {
+        str(value).strip()
+        for value in (store.get("known_item_ids") or [])
+        if str(value).strip()
+    }
+    enrich_item_ids = {
+        str(value).strip()
+        for value in (store.get("enrich_item_ids") or [])
+        if str(value).strip()
+    }
     delay_min = float(_num(store.get("delay_seconds_min"), 1.5) or 1.5)
     delay_max = float(_num(store.get("delay_seconds_max"), 3.5) or 3.5)
 
@@ -194,20 +205,47 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
         "items_total": len(items),
         "page_metas": page_metas,
         "enriched": 0,
+        "enrich_candidates": 0,
+        "new_items": 0,
         "missing_checked": 0,
         "marked_gone": 0,
     }
 
-    # Enrich items missing mpn (optional; default 0 for dry-run speed)
-    if enrich_limit > 0:
+    # The private orchestrator supplies known IDs and one-time incomplete-item
+    # targets. New listing IDs are also enriched once. A plain public/manual
+    # run remains listing-only unless it explicitly supplies enrich_limit.
+    if enrich_mode == "targeted":
+        need = [
+            i for i in items
+            if i.get("product_url")
+            and (
+                str(i.get("merchant_item_id") or "").strip() not in known_item_ids
+                or str(i.get("merchant_item_id") or "").strip() in enrich_item_ids
+            )
+        ]
+        stats["new_items"] = sum(
+            1 for i in items
+            if str(i.get("merchant_item_id") or "").strip() not in known_item_ids
+        )
+    elif enrich_limit > 0:
+        # Backward-compatible controlled test mode for an inline/manual run.
         need = [i for i in items if not i.get("mpn") and i.get("product_url")]
+    else:
+        need = []
+
+    stats["enrich_candidates"] = len(need)
+    if need:
         enriched = 0
         for item in need:
-            if enriched >= enrich_limit:
+            if enrich_limit > 0 and enriched >= enrich_limit:
                 break
             url = str(item.get("product_url") or "").strip()
             if not url:
                 continue
+            if not isinstance(item.get("raw_payload"), dict):
+                item["raw_payload"] = {}
+            item["raw_payload"]["listing_pdp_checked"] = True
+            enriched += 1
             try:
                 status, final_url, html = fetch_html(url, delay_min=delay_min, delay_max=delay_max)
                 if status != 200:
@@ -216,6 +254,7 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                 pdp = parser.parse_pdp_html(
                     html, requested_url=url, final_url=final_url, config=store
                 )
+                item["raw_payload"]["pdp"] = pdp.get("raw_payload") or {}
                 if pdp.get("raw_payload", {}).get("soft_deleted"):
                     item["availability"] = "out_of_stock"
                     item.setdefault("raw_payload", {})["enrich_gone"] = True
@@ -228,13 +267,12 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                         from .normalize import finalize_item
 
                         finalize_item(item)
-                enriched += 1
             except Exception as exc:
                 log(f"  enrich error {url}: {exc}", error=True)
         stats["enriched"] = enriched
 
     # Confirm missing items (soft-delete / OOS)
-    confirm = store.get("confirm_missing") or []
+    confirm = store.get("missing_targets") or store.get("confirm_missing") or []
     if isinstance(confirm, list) and confirm:
         gone = 0
         checked = 0
@@ -255,6 +293,9 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                 pdp = parser.parse_pdp_html(
                     html, requested_url=url, final_url=final_url, config=store
                 )
+                if not isinstance(pdp.get("raw_payload"), dict):
+                    pdp["raw_payload"] = {}
+                pdp["raw_payload"]["listing_missing_pdp_checked"] = True
                 if status == 404 or pdp.get("raw_payload", {}).get("soft_deleted") or pdp.get("availability") == "out_of_stock":
                     gone += 1
                     stub = pdp if pdp.get("merchant_item_id") else dict(pdp)
