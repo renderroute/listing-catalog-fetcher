@@ -1,0 +1,43 @@
+# Example only — replace with real listing templates at runtime via Actions inputs.
+# Do not hardcode production ingest URLs or tokens in this repo.
+
+defaults:
+  delay_seconds_min: 1.5
+  delay_seconds_max: 3.5
+  min_page1_items: 10
+  enrich_limit: 0
+
+stores:
+  - key: example-shop-a
+    platform: listing_html
+    parser: html_listing
+    listing_url_template: "https://example.com/listing?page={page}"
+    page_size_hint: 20
+    min_page1_items: 10
+    card_selector: ".product-card"
+    id_attribute: "data-product-id"
+    title_selectors: [".product-title a", ".product-title"]
+    url_selectors: [".product-title a", "a.product-image"]
+    image_selectors: ["img"]
+    image_attributes: ["data-src", "src"]
+    price_selectors: [".price"]
+    listing_implies_in_stock: true
+    enrich_limit: 0
+    enabled: true
+
+  - key: example-shop-b
+    platform: listing_html
+    parser: html_listing
+    listing_url_template: "https://example.com/search?limit=100&page={page}"
+    page_size_hint: 100
+    min_page1_items: 10
+    card_selector: "[data-product-id]"
+    id_attribute: "data-product-id"
+    title_selectors: [".name a", ".name"]
+    url_selectors: [".name a", "a.product-img"]
+    image_selectors: ["img"]
+    image_attributes: ["data-src", "src"]
+    price_selectors: [".price"]
+    mpn_selectors: [".model", ".sku"]
+    enrich_limit: 0
+    enabled: true

@@ -1,0 +1,236 @@
+name: Fetch public listing catalogs
+
+# Production fetch runner (unlimited public Actions minutes).
+# Store list is NOT hardcoded for nightly runs — a private orchestrator
+# passes retailer key + listing_url_template. This repo must stay anonymous: no site tokens.
+
+on:
+  workflow_dispatch:
+    inputs:
+      store:
+        description: 'Retailer key (with listing_url_template + page_size for single-store)'
+        required: false
+        default: ''
+      listing_url_template:
+        description: 'Listing URL with {page} placeholder'
+        required: false
+        default: ''
+      page_size:
+        description: 'Expected items per listing page'
+        required: false
+        default: '20'
+      stores_json:
+        description: 'JSON array of store objects from the private orchestrate job'
+        required: false
+        default: ''
+      enrich_limit:
+        description: 'Max PDP enrich calls per store (0 = listing only)'
+        required: false
+        default: '0'
+  repository_dispatch:
+    types: [fetch-listings]
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare dynamic store list
+        id: prep
+        run: |
+          set -euo pipefail
+          mkdir -p .out /tmp/listing-fetch
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+          name = os.environ.get("GITHUB_EVENT_NAME") or ""
+          out = Path(os.environ["GITHUB_OUTPUT"])
+          path = Path("/tmp/listing-fetch/stores.json")
+
+          def write_batch(stores, mode: str) -> None:
+              if not isinstance(stores, list) or not stores:
+                  raise SystemExit(f"{mode}: stores must be a non-empty list")
+              path.write_text(json.dumps(stores), encoding="utf-8")
+              print(f"{mode} stores: {len(stores)}")
+              with out.open("a", encoding="utf-8") as fh:
+                  fh.write(f"mode={mode}\n")
+                  fh.write(f"stores_json={path}\n")
+                  fh.write("store=\n")
+                  fh.write("listing_url_template=\n")
+                  fh.write("page_size=\n")
+                  fh.write("enrich_limit=\n")
+
+          if name == "repository_dispatch":
+              payload = event.get("client_payload") or {}
+              write_batch(payload.get("stores"), "repository_dispatch")
+              raise SystemExit(0)
+
+          inputs = event.get("inputs") or {}
+          raw = (inputs.get("stores_json") or "").strip()
+          if raw:
+              stores = json.loads(raw)
+              write_batch(stores, "stores_json")
+              raise SystemExit(0)
+
+          store = (inputs.get("store") or "").strip()
+          template = (inputs.get("listing_url_template") or "").strip()
+          page_size = (inputs.get("page_size") or "20").strip() or "20"
+          enrich_limit = (inputs.get("enrich_limit") or "0").strip() or "0"
+          with out.open("a", encoding="utf-8") as fh:
+              fh.write(f"store={store}\n")
+              fh.write(f"listing_url_template={template}\n")
+              fh.write(f"page_size={page_size}\n")
+              fh.write(f"enrich_limit={enrich_limit}\n")
+              if store and template:
+                  fh.write("mode=inline\n")
+                  fh.write("stores_json=\n")
+              else:
+                  raise SystemExit(
+                      "Provide stores_json, or store+listing_url_template."
+                  )
+          PY
+
+      - name: Fetch listings
+        id: fetch
+        run: |
+          set -euo pipefail
+          MODE="${{ steps.prep.outputs.mode }}"
+          mkdir -p .out
+          set +e
+          if [ "$MODE" = "repository_dispatch" ] || [ "$MODE" = "stores_json" ]; then
+            python -m src.fetch_all --out-dir .out --stores-json "${{ steps.prep.outputs.stores_json }}"
+          else
+            python -m src.fetch_all --out-dir .out \
+              --inline-store "${{ steps.prep.outputs.store }}" \
+              --listing-url-template "${{ steps.prep.outputs.listing_url_template }}" \
+              --page-size "${{ steps.prep.outputs.page_size }}" \
+              --enrich-limit "${{ steps.prep.outputs.enrich_limit }}"
+          fi
+          set -e
+          ls -la .out || true
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          st = {}
+          p = Path(".out/_fetch_status.json")
+          if p.exists():
+              st = json.loads(p.read_text(encoding="utf-8"))
+          ok = int(st.get("ok") or 0)
+          failed = int(st.get("failed") or 0)
+          fails = st.get("failures") or []
+          has = failed > 0 or (isinstance(fails, list) and len(fails) > 0)
+          print(f"status ok={ok} failed={failed} has_failures={has}")
+          Path("/tmp/has-failures").write_text("true" if has else "false", encoding="utf-8")
+          keys = Path(".out/_bridge_keys.txt")
+          print(f"bridge keys: {(keys.read_text(encoding='utf-8') if keys.exists() else '')}")
+          PY
+          echo "bridge_keys=$(cat .out/_bridge_keys.txt 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+          echo "has_failures=$(cat /tmp/has-failures)" >> "$GITHUB_OUTPUT"
+
+      - name: Push listings to staging
+        id: staging
+        if: steps.fetch.outcome == 'success'
+        env:
+          STAGING_PUSH_TOKEN: ${{ secrets.STAGING_PUSH_TOKEN }}
+          STAGING_REPO: ${{ secrets.STAGING_REPO }}
+          STAGING_BRANCH: ${{ secrets.STAGING_BRANCH }}
+        run: bash scripts/push_staging.sh
+
+      - name: Dispatch listing bridge
+        if: steps.staging.outputs.pushed == 'true' && steps.fetch.outputs.bridge_keys != ''
+        env:
+          BRIDGE_DISPATCH_TOKEN: ${{ secrets.BRIDGE_DISPATCH_TOKEN }}
+          BRIDGE_REPO: ${{ secrets.BRIDGE_REPO }}
+          BRIDGE_WORKFLOW: ${{ secrets.BRIDGE_WORKFLOW }}
+          BRIDGE_REF: ${{ secrets.BRIDGE_REF }}
+          BRIDGE_MODE: ${{ secrets.BRIDGE_MODE }}
+          BRIDGE_STORE_KEYS: ${{ steps.fetch.outputs.bridge_keys }}
+        run: python scripts/dispatch_bridge.py
+
+      - name: Report fetch failures to bridge
+        if: steps.staging.outputs.pushed == 'true' && steps.fetch.outputs.has_failures == 'true' && steps.fetch.outputs.bridge_keys == ''
+        env:
+          BRIDGE_DISPATCH_TOKEN: ${{ secrets.BRIDGE_DISPATCH_TOKEN }}
+          BRIDGE_REPO: ${{ secrets.BRIDGE_REPO }}
+          BRIDGE_WORKFLOW: ${{ secrets.BRIDGE_WORKFLOW }}
+          BRIDGE_REF: ${{ secrets.BRIDGE_REF }}
+          BRIDGE_MODE: ${{ secrets.BRIDGE_MODE }}
+          BRIDGE_FAILURES_ONLY: '1'
+        run: python scripts/dispatch_bridge.py
+
+      # Do not upload listing JSON as a public Actions artifact. The private
+      # staging branch is the only hand-off for scraped data.
+
+      - name: Report fetch outcome
+        if: always()
+        id: outcome
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          out = Path(".out")
+          status_path = out / "_fetch_status.json"
+          fail_path = out / "_failures.json"
+          catalogs = [p for p in out.glob("*.json") if not p.name.startswith("_")]
+          st = {}
+          if status_path.exists():
+              st = json.loads(status_path.read_text(encoding="utf-8"))
+          failures = []
+          if isinstance(st.get("failures"), list):
+              failures = [row for row in st["failures"] if isinstance(row, dict)]
+          if not failures:
+              for key in st.get("failed_keys") or []:
+                  failures.append(
+                      {
+                          "key": key,
+                          "retailer_key": key,
+                          "error": "Listing fetch failed",
+                          "http_status": 0,
+                          "final": True,
+                      }
+                  )
+          for row in failures:
+              row["final"] = True
+          fail_path.write_text(
+              json.dumps({"failures": failures, "final": True}, ensure_ascii=False),
+              encoding="utf-8",
+          )
+          failed = int(st.get("failed") or 0)
+          ok = int(st.get("ok") or 0)
+          print(f"final status ok={ok} failed={failed}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"partial_fail={'true' if failed else 'false'}\n")
+          if not catalogs and failed == 0:
+              raise SystemExit("No listing catalogs written.")
+          PY
+
+      - name: Report partial fetch failures
+        if: always() && steps.outcome.outputs.partial_fail == 'true'
+        run: |
+          echo "::warning::One or more stores failed. Successful listings were still staged and sent to ingest."
+          if [ -f .out/_fetch_status.json ]; then
+            python -c "import json; print(open('.out/_fetch_status.json',encoding='utf-8').read())"
+          fi
+          exit 1

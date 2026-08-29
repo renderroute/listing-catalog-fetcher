@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# Local fetch output (do not commit large catalogs).
+# IMPORTANT: actions/upload-artifact respects gitignore, so CI must NOT upload
+# from an ignored path. Workflow writes/copies to staged-listings/ instead.
+.out/
+
+# Cached / sample HTML used for local parser tests.
+samples/
+.tmp/
+
+# Retailer-specific local experiments stay out of this public repository.
+src/parsers/mdcomputers.py
+src/parsers/vedantcomputers.py
