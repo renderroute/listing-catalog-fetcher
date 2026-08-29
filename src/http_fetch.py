@@ -14,6 +14,16 @@ DEFAULT_UA_POOL = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
 ]
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+class RetryableHttpStatusError(RuntimeError):
+    """An HTTP response that should be retried before failing the store."""
+
+    def __init__(self, status: int, url: str) -> None:
+        super().__init__(f"HTTP {status} for {url} (retryable response)")
+        self.status = status
+        self.url = url
 
 
 def polite_delay(min_seconds: float = 1.5, max_seconds: float = 3.5) -> None:
@@ -24,7 +34,11 @@ def polite_delay(min_seconds: float = 1.5, max_seconds: float = 3.5) -> None:
     time.sleep(random.uniform(lo, hi))
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=20), reraise=True)
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=5, min=15, max=90),
+    reraise=True,
+)
 def fetch_html(
     url: str,
     *,
@@ -51,4 +65,6 @@ def fetch_html(
             time.sleep(pause_after)
     else:
         polite_delay(delay_min, delay_max)
+    if resp.status_code in RETRYABLE_STATUS_CODES:
+        raise RetryableHttpStatusError(resp.status_code, url)
     return resp.status_code, str(resp.url), resp.text

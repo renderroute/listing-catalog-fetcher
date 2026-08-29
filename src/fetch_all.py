@@ -6,6 +6,7 @@ import argparse
 import base64
 import gzip
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -95,11 +96,13 @@ def stores_from_json(path: Path) -> list[dict]:
 
 def _failure_row(key: str, exc: Exception | None = None, error: str = "") -> dict:
     err = (error or (str(exc) if exc else "")).strip() or "Listing fetch failed"
+    status_match = re.search(r"\bHTTP\s+(\d{3})\b", err, re.I)
+    http_status = int(status_match.group(1)) if status_match else 0
     return {
         "key": key,
         "retailer_key": key,
         "error": err,
-        "http_status": 403 if "403" in err else 0,
+        "http_status": http_status,
         "final": True,
     }
 
