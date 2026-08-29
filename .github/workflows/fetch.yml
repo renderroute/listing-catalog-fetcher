@@ -30,6 +30,10 @@ on:
   repository_dispatch:
     types: [fetch-listings]
 
+concurrency:
+  group: listing-catalog-fetcher
+  cancel-in-progress: false
+
 jobs:
   fetch:
     runs-on: ubuntu-latest

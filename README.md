@@ -63,10 +63,9 @@ Store object fields (JSON):
 | `min_page1_items` | Health fail if page 1 has fewer (default 10) |
 | `max_pages` | Optional hard cap |
 | `enrich_mode` | `targeted` for new/incomplete orchestration; empty for listing-only manual runs |
-| `known_item_ids` | IDs already stored by the private Merchant Feeds source |
-| `enrich_item_ids` | Existing incomplete IDs whose one-time PDP check is pending |
+| `enrichment_state_blob` | Compressed private runtime state containing known and eligible IDs/URLs |
 | `enrich_limit` | Optional cap for eligible PDP calls; `0` means all eligible targets |
-| `missing_targets` | Existing `{merchant_item_id, product_url}` rows eligible for one missing check |
+| `missing_targets` | Previously missing `{merchant_item_id, product_url}` rows eligible for one check |
 | `card_selector` | CSS selector for one product card |
 | `id_attribute` / `id_regex` | Where the stable shop item id is found |
 | `title_selectors` / `url_selectors` | Ordered CSS selector lists |

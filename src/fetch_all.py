@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
 import json
 import sys
 from pathlib import Path
@@ -31,6 +33,18 @@ def _int(value: Any, fallback: int) -> int:
         return int(_num(value, fallback))
     except (TypeError, ValueError):
         return fallback
+
+
+def _unpack_enrichment_state(blob: str) -> dict[str, Any]:
+    padding = "=" * (-len(blob) % 4)
+    try:
+        raw = gzip.decompress(base64.urlsafe_b64decode(blob + padding))
+        state = json.loads(raw.decode("utf-8"))
+    except (ValueError, OSError, EOFError, gzip.BadGzipFile, json.JSONDecodeError) as exc:
+        raise ValueError("invalid enrichment state blob") from exc
+    if not isinstance(state, dict):
+        raise ValueError("enrichment state blob must contain an object")
+    return state
 
 
 def stores_from_inline(args: argparse.Namespace) -> list[dict]:
@@ -70,6 +84,11 @@ def stores_from_json(path: Path) -> list[dict]:
         row_out["listing_url_template"] = template
         row_out["platform"] = str(row.get("platform") or "listing_html").strip() or "listing_html"
         row_out["enabled"] = bool(row.get("enabled", True))
+        state_blob = str(row_out.pop("enrichment_state_blob") or "").strip()
+        if state_blob:
+            state = _unpack_enrichment_state(state_blob)
+            for field in ("known_item_ids", "enrich_item_ids", "missing_targets"):
+                row_out[field] = state.get(field) or []
         out.append(row_out)
     return out
 
@@ -296,14 +315,20 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                 if not isinstance(pdp.get("raw_payload"), dict):
                     pdp["raw_payload"] = {}
                 pdp["raw_payload"]["listing_missing_pdp_checked"] = True
-                if status == 404 or pdp.get("raw_payload", {}).get("soft_deleted") or pdp.get("availability") == "out_of_stock":
+                is_gone = (
+                    status == 404
+                    or pdp.get("raw_payload", {}).get("soft_deleted")
+                    or pdp.get("availability") == "out_of_stock"
+                )
+                if is_gone:
                     gone += 1
-                    stub = pdp if pdp.get("merchant_item_id") else dict(pdp)
-                    if mid and not stub.get("merchant_item_id"):
-                        stub["merchant_item_id"] = mid
+                stub = pdp if pdp.get("merchant_item_id") else dict(pdp)
+                if mid and not stub.get("merchant_item_id"):
+                    stub["merchant_item_id"] = mid
+                stub["raw_payload"]["listing_missing_check_only"] = True
+                if is_gone:
                     stub["availability"] = "out_of_stock"
-                    stub.setdefault("raw_payload", {})["missing_confirm"] = True
-                    items.append(stub)
+                items.append(stub)
             except Exception as exc:
                 log(f"  confirm_missing error {url}: {exc}", error=True)
         stats["missing_checked"] = checked
