@@ -65,24 +65,117 @@ jobs:
 
       - name: Prepare dynamic store list
         id: prep
+        env:
+          STAGING_PUSH_TOKEN: ${{ secrets.STAGING_PUSH_TOKEN }}
+          STAGING_REPO: ${{ secrets.STAGING_REPO }}
+          STAGING_BRANCH: ${{ secrets.STAGING_BRANCH }}
         run: |
           set -euo pipefail
           mkdir -p .out /tmp/listing-fetch
 
           python - <<'PY'
+          import base64
+          import hashlib
           import json
           import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
           from pathlib import Path
 
           event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
           name = os.environ.get("GITHUB_EVENT_NAME") or ""
           out = Path(os.environ["GITHUB_OUTPUT"])
           path = Path("/tmp/listing-fetch/stores.json")
+          manifest_paths_file = Path("/tmp/listing-fetch/manifest_paths.txt")
+          manifest_paths_seen = []
+
+          def load_private_manifests(stores):
+              token = (os.environ.get("STAGING_PUSH_TOKEN") or "").strip()
+              repo = (os.environ.get("STAGING_REPO") or "").strip()
+              branch = (os.environ.get("STAGING_BRANCH") or "listing-incoming").strip()
+              hydrated = []
+              loaded = 0
+              for store in stores:
+                  if not isinstance(store, dict):
+                      continue
+                  manifest_path = str(store.get("pdp_manifest_path") or "").strip()
+                  if not manifest_path:
+                      hydrated.append(store)
+                      continue
+                  if not token or not repo:
+                      raise SystemExit(
+                          "PDP manifest requires STAGING_PUSH_TOKEN and STAGING_REPO"
+                      )
+                  api_url = (
+                      "https://api.github.com/repos/"
+                      + repo.removeprefix("https://github.com/").removesuffix(".git").strip("/")
+                      + "/contents/"
+                      + urllib.parse.quote(manifest_path, safe="/")
+                      + "?ref="
+                      + urllib.parse.quote(branch, safe="")
+                  )
+                  request = urllib.request.Request(
+                      api_url,
+                      method="GET",
+                      headers={
+                          "Authorization": f"Bearer {token}",
+                          "Accept": "application/vnd.github+json",
+                          "X-GitHub-Api-Version": "2022-11-28",
+                          "User-Agent": "PublicListingFetcher/0.2",
+                      },
+                  )
+                  try:
+                      with urllib.request.urlopen(request, timeout=60) as response:
+                          response_data = json.loads(response.read().decode("utf-8"))
+                  except urllib.error.HTTPError as exc:
+                      detail = exc.read().decode("utf-8", errors="replace")[:500]
+                      raise SystemExit(
+                          f"private PDP manifest HTTP {exc.code}: {detail}"
+                      ) from exc
+                  except urllib.error.URLError as exc:
+                      raise SystemExit(f"private PDP manifest request failed: {exc}") from exc
+                  encoded = str(response_data.get("content") or "").replace("\n", "")
+                  try:
+                      raw = base64.b64decode(encoded, validate=True)
+                      manifest = json.loads(raw.decode("utf-8"))
+                  except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                      raise SystemExit(
+                          f"invalid private PDP manifest: {manifest_path}"
+                      ) from exc
+                  expected_hash = str(store.get("pdp_manifest_sha256") or "").strip()
+                  if expected_hash and hashlib.sha256(raw).hexdigest() != expected_hash:
+                      raise SystemExit(
+                          f"private PDP manifest hash mismatch: {manifest_path}"
+                      )
+                  key = str(store.get("key") or "").strip()
+                  if manifest.get("schema_version") != 1 or manifest.get("retailer_key") != key:
+                      raise SystemExit(
+                          f"private PDP manifest retailer mismatch: {manifest_path}"
+                      )
+                  items = manifest.get("enrich_items")
+                  if not isinstance(items, list):
+                      raise SystemExit(
+                          f"private PDP manifest has no item list: {manifest_path}"
+                      )
+                  row = dict(store)
+                  row["enrich_items"] = items
+                  row.pop("pdp_manifest_path", None)
+                  row.pop("pdp_manifest_sha256", None)
+                  hydrated.append(row)
+                  manifest_paths_seen.append(manifest_path)
+                  loaded += 1
+              print(f"loaded private PDP manifests: {loaded}")
+              return hydrated
 
           def write_batch(stores, mode: str, pdp_only: str = "", bridge_mode: str = "") -> None:
               if not isinstance(stores, list) or not stores:
                   raise SystemExit(f"{mode}: stores must be a non-empty list")
+              stores = load_private_manifests(stores)
               path.write_text(json.dumps(stores), encoding="utf-8")
+              manifest_paths_file.write_text(
+                  "\n".join(manifest_paths_seen), encoding="utf-8"
+              )
               print(f"{mode} stores: {len(stores)}")
               with out.open("a", encoding="utf-8") as fh:
                   fh.write(f"mode={mode}\n")
@@ -267,3 +360,69 @@ jobs:
             python -c "import json; print(open('.out/_fetch_status.json',encoding='utf-8').read())"
           fi
           exit 1
+
+      - name: Remove consumed private PDP manifests
+        if: always()
+        env:
+          STAGING_PUSH_TOKEN: ${{ secrets.STAGING_PUSH_TOKEN }}
+          STAGING_REPO: ${{ secrets.STAGING_REPO }}
+          STAGING_BRANCH: ${{ secrets.STAGING_BRANCH }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          paths_file = Path("/tmp/listing-fetch/manifest_paths.txt")
+          token = (os.environ.get("STAGING_PUSH_TOKEN") or "").strip()
+          repo = (os.environ.get("STAGING_REPO") or "").strip()
+          branch = (os.environ.get("STAGING_BRANCH") or "listing-incoming").strip()
+          if not paths_file.exists() or not token or not repo:
+              raise SystemExit(0)
+          repo = repo.removeprefix("https://github.com/").removesuffix(".git").strip("/")
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "PublicListingFetcher/0.2",
+          }
+          for manifest_path in paths_file.read_text(encoding="utf-8").splitlines():
+              manifest_path = manifest_path.strip()
+              if not manifest_path:
+                  continue
+              base_url = (
+                  f"https://api.github.com/repos/{repo}/contents/"
+                  f"{urllib.parse.quote(manifest_path, safe='/')}"
+                  f"?ref={urllib.parse.quote(branch, safe='')}"
+              )
+              try:
+                  request = urllib.request.Request(base_url, headers=headers)
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      current = json.loads(response.read().decode("utf-8"))
+                  sha = str(current.get("sha") or "").strip()
+                  if not sha:
+                      print(f"manifest cleanup skipped (no sha): {manifest_path}")
+                      continue
+                  delete_body = json.dumps({
+                      "message": f"remove consumed PDP manifest {manifest_path}",
+                      "sha": sha,
+                      "branch": branch,
+                  }).encode("utf-8")
+                  delete_request = urllib.request.Request(
+                      base_url.split("?")[0],
+                      data=delete_body,
+                      method="DELETE",
+                      headers={**headers, "Content-Type": "application/json"},
+                  )
+                  with urllib.request.urlopen(delete_request, timeout=60):
+                      pass
+                  print(f"removed private PDP manifest: {manifest_path}")
+              except urllib.error.HTTPError as exc:
+                  print(f"manifest cleanup skipped HTTP {exc.code}: {manifest_path}")
+              except urllib.error.URLError as exc:
+                  print(f"manifest cleanup skipped: {manifest_path}: {exc}")
+          PY

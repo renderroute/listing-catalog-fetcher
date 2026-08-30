@@ -5,7 +5,9 @@ Generic scheduled / dispatched fetcher for **public store listing HTML**
 
 This repository is intentionally **anonymous**. It does not document, name, or
 call any downstream application ingest endpoint. Store URLs and selectors
-arrive only in the runtime dispatch payload from a private orchestrator.
+arrive only at runtime from a private orchestrator. For PDP-only backfills,
+product URLs arrive through a temporary private manifest rather than a
+workflow-dispatch input.
 
 ## What it does
 
@@ -68,6 +70,7 @@ Store object fields (JSON):
 | `enrich_limit` | Cap for eligible PDP calls; `0` means all eligible targets |
 | `pdp_only` | Process existing `enrich_items` without fetching listing pages |
 | `enrich_items` | Existing item rows supplied by the private orchestrator for PDP-only backfill |
+| `pdp_manifest_path` | Temporary private manifest reference used before the workflow prepares `enrich_items` |
 | `missing_targets` | Previously missing `{merchant_item_id, product_url}` rows eligible for one check |
 | `card_selector` | CSS selector for one product card |
 | `id_attribute` / `id_regex` | Where the stable shop item id is found |
