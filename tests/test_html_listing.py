@@ -63,9 +63,13 @@ class HtmlListingParserTests(unittest.TestCase):
         <html><head>
           <script type="application/ld+json">
           {"@type":"Product","name":"Example CPU","brand":{"name":"Example Brand"},
-           "model":"EX-1","offers":{"price":"1234","availability":"https://schema.org/InStock"}}
+           "model":"EX-1","gtin13":"1234567890123",
+           "offers":{"price":"1234","availability":"https://schema.org/InStock"}}
           </script>
-        </head><body><h1>Example CPU</h1></body></html>
+        </head><body>
+          <h1>Example CPU</h1>
+          <div>UPC: 012345678905</div>
+        </body></html>
         """
         parsed = html_listing.parse_pdp_html(
             product,
@@ -75,6 +79,8 @@ class HtmlListingParserTests(unittest.TestCase):
         self.assertEqual(parsed["title"], "Example CPU")
         self.assertEqual(parsed["brand"], "Example Brand")
         self.assertEqual(parsed["mpn"], "EX-1")
+        self.assertEqual(parsed["ean"], "1234567890123")
+        self.assertEqual(parsed["upc"], "012345678905")
         self.assertEqual(parsed["effective_price"], 1234.0)
         self.assertEqual(parsed["availability"], "in_stock")
 
@@ -85,6 +91,28 @@ class HtmlListingParserTests(unittest.TestCase):
         )
         self.assertTrue(deleted["raw_payload"]["soft_deleted"])
         self.assertEqual(deleted["availability"], "out_of_stock")
+
+    def test_pdp_visible_vedant_labels(self):
+        product = """
+        <html><body>
+          <h1>Example GPU</h1>
+          <div>Stock: In Stock</div>
+          <div>Brand: Gigabyte</div>
+          <div>Model: GV-EXAMPLE-1</div>
+          <div>UPC: 889523047521</div>
+          <div>EAN: 4719331355494</div>
+        </body></html>
+        """
+        parsed = html_listing.parse_pdp_html(
+            product,
+            requested_url="https://example.invalid/item/example",
+            final_url="https://example.invalid/item/example",
+            config={"product_markers": ["h1"]},
+        )
+        self.assertEqual(parsed["brand"], "Gigabyte")
+        self.assertEqual(parsed["mpn"], "GV-EXAMPLE-1")
+        self.assertEqual(parsed["upc"], "889523047521")
+        self.assertEqual(parsed["ean"], "4719331355494")
 
 
 if __name__ == "__main__":

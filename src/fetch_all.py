@@ -227,6 +227,14 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
         "items_total": len(items),
         "page_metas": page_metas,
         "enriched": 0,
+        "enrichment_attempted": 0,
+        "enrichment_succeeded": 0,
+        "enrichment_errors": 0,
+        "brand_found": 0,
+        "brand_missing": 0,
+        "gtin_found": 0,
+        "ean_found": 0,
+        "upc_found": 0,
         "enrich_candidates": 0,
         "new_items": 0,
         "missing_checked": 0,
@@ -259,18 +267,22 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
     if need:
         enriched = 0
         for item in need:
-            if enrich_limit > 0 and enriched >= enrich_limit:
+            if enrich_limit > 0 and stats["enrichment_attempted"] >= enrich_limit:
                 break
             url = str(item.get("product_url") or "").strip()
             if not url:
                 continue
             if not isinstance(item.get("raw_payload"), dict):
                 item["raw_payload"] = {}
-            item["raw_payload"]["listing_pdp_checked"] = True
-            enriched += 1
+            stats["enrichment_attempted"] += 1
             try:
                 status, final_url, html = fetch_html(url, delay_min=delay_min, delay_max=delay_max)
                 if status != 200:
+                    item["raw_payload"]["listing_pdp_status"] = (
+                        "retryable_error" if status in {429, 500, 502, 503, 504} else "error"
+                    )
+                    item["raw_payload"]["listing_pdp_error"] = f"HTTP {status}"
+                    stats["enrichment_errors"] += 1
                     log(f"  enrich skip HTTP {status} {url}", error=True)
                     continue
                 pdp = parser.parse_pdp_html(
@@ -279,7 +291,8 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                 item["raw_payload"]["pdp"] = pdp.get("raw_payload") or {}
                 if pdp.get("raw_payload", {}).get("soft_deleted"):
                     item["availability"] = "out_of_stock"
-                    item.setdefault("raw_payload", {})["enrich_gone"] = True
+                    item["raw_payload"]["enrich_gone"] = True
+                    item["raw_payload"]["listing_pdp_status"] = "gone"
                 else:
                     for field in ("mpn", "brand", "title", "gtin", "ean", "upc"):
                         if pdp.get(field) and not item.get(field):
@@ -289,7 +302,28 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                         from .normalize import finalize_item
 
                         finalize_item(item)
+                    item["raw_payload"]["listing_pdp_status"] = (
+                        "complete" if item.get("brand") else "missing_brand"
+                    )
+                item["raw_payload"]["listing_pdp_error"] = ""
+                item["raw_payload"]["listing_pdp_checked"] = True
+                enriched += 1
+                stats["enrichment_succeeded"] += 1
+                if item.get("brand"):
+                    stats["brand_found"] += 1
+                else:
+                    stats["brand_missing"] += 1
+                for field, counter in (
+                    ("gtin", "gtin_found"),
+                    ("ean", "ean_found"),
+                    ("upc", "upc_found"),
+                ):
+                    if item.get(field):
+                        stats[counter] += 1
             except Exception as exc:
+                item["raw_payload"]["listing_pdp_status"] = "error"
+                item["raw_payload"]["listing_pdp_error"] = str(exc)[:500]
+                stats["enrichment_errors"] += 1
                 log(f"  enrich error {url}: {exc}", error=True)
         stats["enriched"] = enriched
 
@@ -337,7 +371,10 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
         stats["missing_checked"] = checked
         stats["marked_gone"] = gone
 
-    log(f"  {key}: items={len(items)} pages={stats['listing_pages']} enriched={stats['enriched']}")
+    log(
+        f"  {key}: items={len(items)} pages={stats['listing_pages']} "
+        f"enriched={stats['enriched']} errors={stats['enrichment_errors']}"
+    )
     return items, stats
 
 

@@ -229,6 +229,29 @@ def _brand_from_ld(node: dict[str, Any]) -> Optional[str]:
     return str(value).strip() if value and str(value).strip() else None
 
 
+def _ld_text(node: dict[str, Any], keys: tuple[str, ...]) -> Optional[str]:
+    for key in keys:
+        value = node.get(key)
+        if isinstance(value, dict):
+            value = value.get("name") or value.get("value")
+        if isinstance(value, list):
+            value = value[0] if value else None
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _label_value(page_text: str, labels: tuple[str, ...]) -> Optional[str]:
+    for label in labels:
+        match = re.search(
+            rf"(?im)^\s*[-•]?\s*{re.escape(label)}\s*[:\-]\s*(.+?)\s*$",
+            page_text,
+        )
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return None
+
+
 def _soft_deleted(
     requested_url: str, final_url: str, soup: BeautifulSoup, config: dict
 ) -> bool:
@@ -292,11 +315,23 @@ def parse_pdp_html(
         node = products[0]
         item["title"] = str(node.get("name")).strip() if node.get("name") else None
         item["brand"] = _brand_from_ld(node)
-        model = node.get("model")
-        mpn = node.get("mpn") or model or node.get("sku")
-        item["mpn"] = str(mpn).strip() if mpn else None
+        item["product_type"] = _ld_text(node, ("category",))
+        model = _ld_text(node, ("model",))
+        item["mpn"] = _ld_text(node, ("mpn", "model", "sku"))
+        item["gtin"] = _ld_text(node, ("gtin", "gtin14"))
+        item["ean"] = _ld_text(node, ("ean", "gtin13"))
+        item["upc"] = _ld_text(node, ("upc", "gtin12"))
+        if item["gtin"] and len(re.sub(r"\D", "", item["gtin"])) == 13 and not item["ean"]:
+            item["ean"] = item["gtin"]
+        if item["gtin"] and len(re.sub(r"\D", "", item["gtin"])) == 12 and not item["upc"]:
+            item["upc"] = item["gtin"]
         raw["json_ld_sku"] = node.get("sku")
         raw["json_ld_model"] = model
+        raw["json_ld_category"] = node.get("category")
+        raw["json_ld_gtin"] = node.get("gtin")
+        raw["json_ld_gtin12"] = node.get("gtin12")
+        raw["json_ld_gtin13"] = node.get("gtin13")
+        raw["json_ld_gtin14"] = node.get("gtin14")
         offers = node.get("offers")
         offer = offers[0] if isinstance(offers, list) and offers else offers
         if isinstance(offer, dict):
@@ -319,6 +354,21 @@ def parse_pdp_html(
                 if value:
                     item[field] = value
                     raw[f"{field}_text"] = value
+    if not item.get("brand"):
+        item["brand"] = _label_value(page_text, ("Brand",))
+    if not item.get("mpn"):
+        item["mpn"] = _label_value(page_text, ("Model", "MPN", "Product Code", "SKU"))
+    if not item.get("upc"):
+        item["upc"] = _label_value(page_text, ("UPC",))
+    if not item.get("ean"):
+        item["ean"] = _label_value(page_text, ("EAN",))
+    if not item.get("gtin"):
+        item["gtin"] = _label_value(page_text, ("GTIN",))
+    if not item.get("product_type"):
+        item["product_type"] = _label_value(page_text, ("Category", "Product Type"))
+    for field in ("brand", "mpn", "upc", "ean", "gtin", "product_type"):
+        if item.get(field):
+            raw[f"{field}_found"] = item[field]
     if not item.get("title"):
         title = soup.select_one("h1, title")
         item["title"] = _text(title)
