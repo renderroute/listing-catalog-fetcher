@@ -114,6 +114,27 @@ class HtmlListingParserTests(unittest.TestCase):
         self.assertEqual(parsed["upc"], "889523047521")
         self.assertEqual(parsed["ean"], "4719331355494")
 
+    def test_pdp_visible_md_labels(self):
+        product = """
+        <html><body>
+          <h1>Gigabyte RTX 5080 Gaming OC 16GB GDDR7 Graphics Card</h1>
+          <ul class="product-details">
+            <li>Brand: GIGABYTE</li>
+            <li>Product Code: GV-N5080GAMING-OC-16GD</li>
+            <li>Availability: In Stock</li>
+          </ul>
+        </body></html>
+        """
+        parsed = html_listing.parse_pdp_html(
+            product,
+            requested_url="https://example.invalid/product/example",
+            final_url="https://example.invalid/product/example",
+            config={"product_markers": [".product-details"]},
+        )
+        self.assertEqual(parsed["brand"], "GIGABYTE")
+        self.assertEqual(parsed["mpn"], "GV-N5080GAMING-OC-16GD")
+        self.assertEqual(parsed["availability"], "in_stock")
+
 
 if __name__ == "__main__":
     unittest.main()
