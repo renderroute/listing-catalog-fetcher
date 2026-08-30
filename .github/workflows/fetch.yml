@@ -24,9 +24,17 @@ on:
         required: false
         default: ''
       enrich_limit:
-        description: 'Max PDP enrich calls per store (0 = listing only)'
+        description: 'Combined PDP enrich cap from the private orchestrator'
         required: false
         default: '0'
+      pdp_only:
+        description: 'Enrich existing incomplete items without fetching listings'
+        required: false
+        default: 'false'
+      bridge_mode:
+        description: 'Optional bridge mode override for a dedicated PDP run'
+        required: false
+        default: ''
   repository_dispatch:
     types: [fetch-listings]
 
@@ -71,7 +79,7 @@ jobs:
           out = Path(os.environ["GITHUB_OUTPUT"])
           path = Path("/tmp/listing-fetch/stores.json")
 
-          def write_batch(stores, mode: str) -> None:
+          def write_batch(stores, mode: str, pdp_only: str = "", bridge_mode: str = "") -> None:
               if not isinstance(stores, list) or not stores:
                   raise SystemExit(f"{mode}: stores must be a non-empty list")
               path.write_text(json.dumps(stores), encoding="utf-8")
@@ -83,17 +91,29 @@ jobs:
                   fh.write("listing_url_template=\n")
                   fh.write("page_size=\n")
                   fh.write("enrich_limit=\n")
+                  fh.write(f"pdp_only={pdp_only}\n")
+                  fh.write(f"bridge_mode={bridge_mode}\n")
 
           if name == "repository_dispatch":
               payload = event.get("client_payload") or {}
-              write_batch(payload.get("stores"), "repository_dispatch")
+              write_batch(
+                  payload.get("stores"),
+                  "repository_dispatch",
+                  str(payload.get("pdp_only") or "").lower(),
+                  str(payload.get("bridge_mode") or ""),
+              )
               raise SystemExit(0)
 
           inputs = event.get("inputs") or {}
           raw = (inputs.get("stores_json") or "").strip()
           if raw:
               stores = json.loads(raw)
-              write_batch(stores, "stores_json")
+              write_batch(
+                  stores,
+                  "stores_json",
+                  str(inputs.get("pdp_only") or "false").lower(),
+                  str(inputs.get("bridge_mode") or ""),
+              )
               raise SystemExit(0)
 
           store = (inputs.get("store") or "").strip()
@@ -105,6 +125,8 @@ jobs:
               fh.write(f"listing_url_template={template}\n")
               fh.write(f"page_size={page_size}\n")
               fh.write(f"enrich_limit={enrich_limit}\n")
+              fh.write(f"pdp_only={str(inputs.get('pdp_only') or 'false').lower()}\n")
+              fh.write(f"bridge_mode={str(inputs.get('bridge_mode') or '')}\n")
               if store and template:
                   fh.write("mode=inline\n")
                   fh.write("stores_json=\n")
@@ -119,16 +141,22 @@ jobs:
         run: |
           set -euo pipefail
           MODE="${{ steps.prep.outputs.mode }}"
+          PDP_ONLY="${{ steps.prep.outputs.pdp_only }}"
           mkdir -p .out
           set +e
           if [ "$MODE" = "repository_dispatch" ] || [ "$MODE" = "stores_json" ]; then
-            python -m src.fetch_all --out-dir .out --stores-json "${{ steps.prep.outputs.stores_json }}"
+            if [ "$PDP_ONLY" = "true" ]; then
+              python -m src.fetch_all --out-dir .out --stores-json "${{ steps.prep.outputs.stores_json }}" --pdp-only
+            else
+              python -m src.fetch_all --out-dir .out --stores-json "${{ steps.prep.outputs.stores_json }}"
+            fi
           else
             python -m src.fetch_all --out-dir .out \
               --inline-store "${{ steps.prep.outputs.store }}" \
               --listing-url-template "${{ steps.prep.outputs.listing_url_template }}" \
               --page-size "${{ steps.prep.outputs.page_size }}" \
-              --enrich-limit "${{ steps.prep.outputs.enrich_limit }}"
+              --enrich-limit "${{ steps.prep.outputs.enrich_limit }}" \
+              ${{ steps.prep.outputs.pdp_only == 'true' && '--pdp-only' || '' }}
           fi
           set -e
           ls -la .out || true
@@ -167,7 +195,7 @@ jobs:
           BRIDGE_REPO: ${{ secrets.BRIDGE_REPO }}
           BRIDGE_WORKFLOW: ${{ secrets.BRIDGE_WORKFLOW }}
           BRIDGE_REF: ${{ secrets.BRIDGE_REF }}
-          BRIDGE_MODE: ${{ secrets.BRIDGE_MODE }}
+          BRIDGE_MODE: ${{ steps.prep.outputs.bridge_mode || secrets.BRIDGE_MODE }}
           BRIDGE_STORE_KEYS: ${{ steps.fetch.outputs.bridge_keys }}
         run: python scripts/dispatch_bridge.py
 

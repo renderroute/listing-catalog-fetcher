@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import gzip
 import json
 import re
@@ -88,7 +89,7 @@ def stores_from_json(path: Path) -> list[dict]:
         state_blob = str(row_out.pop("enrichment_state_blob") or "").strip()
         if state_blob:
             state = _unpack_enrichment_state(state_blob)
-            for field in ("known_item_ids", "enrich_item_ids", "missing_targets"):
+            for field in ("known_item_ids", "enrich_item_ids", "missing_targets", "enrich_items"):
                 row_out[field] = state.get(field) or []
         out.append(row_out)
     return out
@@ -144,7 +145,142 @@ def _dedupe_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def fetch_store_pdp_enrichment(store: dict) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Enrich existing WordPress rows without fetching listing pages."""
+    parser = resolve_parser(store)
+    key = str(store.get("key") or "").strip()
+    candidates = store.get("enrich_items") or []
+    if not isinstance(candidates, list):
+        candidates = []
+
+    items: list[dict[str, Any]] = []
+    for row in candidates:
+        if not isinstance(row, dict):
+            continue
+        item = {
+            "merchant_item_id": str(row.get("merchant_item_id") or "").strip(),
+            "product_url": str(row.get("product_url") or "").strip(),
+            "image_url": row.get("image_url") or "",
+            "title": row.get("title") or "",
+            "product_type": row.get("product_type"),
+            "brand": row.get("brand") or "",
+            "mpn": row.get("mpn") or "",
+            "gtin": row.get("gtin") or None,
+            "ean": row.get("ean") or None,
+            "upc": row.get("upc") or None,
+            "feed_condition": row.get("feed_condition") or "new",
+            "availability": row.get("availability") or "in_stock",
+            "price": row.get("price"),
+            "sale_price": row.get("sale_price"),
+            "effective_price": row.get("effective_price"),
+            "raw_payload": {},
+        }
+        raw_payload = row.get("raw_payload")
+        if isinstance(raw_payload, dict):
+            item["raw_payload"] = dict(raw_payload)
+        elif isinstance(raw_payload, str) and raw_payload.strip():
+            try:
+                decoded = json.loads(raw_payload)
+                if isinstance(decoded, dict):
+                    item["raw_payload"] = decoded
+            except json.JSONDecodeError:
+                pass
+        if item["merchant_item_id"] and item["product_url"]:
+            items.append(item)
+
+    limit = _int(store.get("enrich_limit"), 0)
+    if limit > 0:
+        items = items[:limit]
+    stats: dict[str, Any] = {
+        "listing_pages": 0,
+        "items_before_dedupe": len(items),
+        "items_total": len(items),
+        "page_metas": [],
+        "enriched": 0,
+        "enrichment_attempted": 0,
+        "enrichment_succeeded": 0,
+        "enrichment_errors": 0,
+        "brand_found": 0,
+        "brand_missing": 0,
+        "gtin_found": 0,
+        "ean_found": 0,
+        "upc_found": 0,
+        "enrich_candidates": len(items),
+        "new_items": 0,
+        "missing_checked": 0,
+        "marked_gone": 0,
+    }
+
+    for item in items:
+        url = str(item.get("product_url") or "").strip()
+        raw_payload = item.setdefault("raw_payload", {})
+        raw_payload["listing_pdp_only"] = True
+        stats["enrichment_attempted"] += 1
+        try:
+            status, final_url, html = fetch_html(
+                url,
+                delay_min=float(_num(store.get("delay_seconds_min"), 1.5) or 1.5),
+                delay_max=float(_num(store.get("delay_seconds_max"), 3.5) or 3.5),
+            )
+            if status != 200:
+                raw_payload["listing_pdp_status"] = (
+                    "retryable_error" if status in {429, 500, 502, 503, 504} else "error"
+                )
+                raw_payload["listing_pdp_error"] = f"HTTP {status}"
+                stats["enrichment_errors"] += 1
+                log(f"  pdp-only skip HTTP {status} {url}", error=True)
+                continue
+
+            pdp = parser.parse_pdp_html(
+                html,
+                requested_url=url,
+                final_url=final_url,
+                config=store,
+            )
+            raw_payload["pdp"] = pdp.get("raw_payload") or {}
+            if pdp.get("raw_payload", {}).get("soft_deleted"):
+                item["availability"] = "out_of_stock"
+                raw_payload["listing_pdp_status"] = "gone"
+                stats["marked_gone"] += 1
+            else:
+                for field in ("mpn", "brand", "title", "gtin", "ean", "upc"):
+                    if pdp.get(field) and not item.get(field):
+                        item[field] = pdp[field]
+                raw_payload["listing_pdp_status"] = (
+                    "complete" if item.get("brand") else "missing_brand"
+                )
+            raw_payload["listing_pdp_error"] = ""
+            raw_payload["listing_pdp_checked"] = True
+            stats["enriched"] += 1
+            stats["enrichment_succeeded"] += 1
+            if item.get("brand"):
+                stats["brand_found"] += 1
+            else:
+                stats["brand_missing"] += 1
+            for field, counter in (
+                ("gtin", "gtin_found"),
+                ("ean", "ean_found"),
+                ("upc", "upc_found"),
+            ):
+                if item.get(field):
+                    stats[counter] += 1
+        except Exception as exc:
+            raw_payload["listing_pdp_status"] = "error"
+            raw_payload["listing_pdp_error"] = str(exc)[:500]
+            stats["enrichment_errors"] += 1
+            log(f"  pdp-only error {url}: {exc}", error=True)
+
+    log(
+        f"  {key}: pdp-only items={len(items)} "
+        f"enriched={stats['enriched']} errors={stats['enrichment_errors']}"
+    )
+    return items, stats
+
+
 def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if bool(store.get("pdp_only")):
+        return fetch_store_pdp_enrichment(store)
+
     parser = resolve_parser(store)
     key = str(store.get("key") or "").strip()
     template = str(store.get("listing_url_template") or "").strip()
@@ -386,6 +522,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--listing-url-template", default="", help="URL template with {page}")
     parser.add_argument("--page-size", type=int, default=20, help="Expected items per page")
     parser.add_argument("--enrich-limit", type=int, default=0, help="Max PDP enrich calls (default 0)")
+    parser.add_argument("--pdp-only", action="store_true", help="Enrich existing rows without fetching listings")
     parser.add_argument("--dry-run", action="store_true", help="Fetch but do not write files")
     args = parser.parse_args(argv)
 
@@ -397,6 +534,9 @@ def main(argv: list[str] | None = None) -> int:
         log("mode=inline dynamic store")
     elif (args.stores_json or "").strip():
         stores = stores_from_json(Path(args.stores_json))
+        if args.pdp_only:
+            for store in stores:
+                store["pdp_only"] = True
         log(f"mode=stores-json count={len(stores)}")
     else:
         log("Provide --stores-json or --inline-store + --listing-url-template", error=True)
@@ -411,33 +551,39 @@ def main(argv: list[str] | None = None) -> int:
     failed_rows: list[dict] = []
     bridge_keys: list[str] = []
 
-    for store in stores:
-        key = str(store.get("key") or "").strip()
-        if not key:
-            continue
-        if not store.get("enabled", True):
-            log(f"skip {key} (disabled)")
-            continue
-        log(f"fetch {key} ...")
-        try:
-            items, stats = fetch_store_listings(store)
-            envelope = build_envelope(
-                retailer_key=key,
-                feed_format="listing_html",
-                items=items,
-                stats=stats,
-            )
-            if not args.dry_run:
-                path = out_dir / f"{key}.json"
-                path.write_text(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-                log(f"  wrote {path}")
-            ok += 1
-            bridge_keys.append(key)
-        except Exception as exc:
-            failed += 1
-            failed_keys.append(key)
-            failed_rows.append(_failure_row(key, exc))
-            log(f"  FAIL {key}: {exc}", error=True)
+    active_stores = [
+        store for store in stores
+        if str(store.get("key") or "").strip() and store.get("enabled", True)
+    ]
+    with ThreadPoolExecutor(max_workers=max(1, min(4, len(active_stores)))) as executor:
+        future_to_store = {}
+        for store in active_stores:
+            key = str(store.get("key") or "").strip()
+            log(f"fetch {key} ...")
+            future_to_store[executor.submit(fetch_store_listings, store)] = (key, store)
+        for future in as_completed(future_to_store):
+            key, store = future_to_store[future]
+            try:
+                items, stats = future.result()
+                envelope = build_envelope(
+                    retailer_key=key,
+                    feed_format="listing_html",
+                    items=items,
+                    stats=stats,
+                )
+                if bool(store.get("pdp_only")):
+                    envelope["listing_pdp_only"] = True
+                if not args.dry_run:
+                    path = out_dir / f"{key}.json"
+                    path.write_text(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+                    log(f"  wrote {path}")
+                ok += 1
+                bridge_keys.append(key)
+            except Exception as exc:
+                failed += 1
+                failed_keys.append(key)
+                failed_rows.append(_failure_row(key, exc))
+                log(f"  FAIL {key}: {exc}", error=True)
 
     if not args.dry_run:
         _write_bridge_keys(out_dir, bridge_keys)

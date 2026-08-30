@@ -13,13 +13,14 @@ arrive only in the runtime dispatch payload from a private orchestrator.
    - `workflow_dispatch` inputs: `store` + `listing_url_template` + `page_size`
    - `repository_dispatch` type `fetch-listings` with `client_payload.stores`
    - or a JSON file passed as `--stores-json`
-2. Fetches listing pages politely (sequential, delays, retries)
+2. Fetches selected retailer listings concurrently, with polite per-store delays and retries
 3. In orchestrated runs, opens product pages only for new IDs and one-time
-   incomplete-item targets; a manual run can still use a small limit
+   incomplete-item targets; the combined run has a shared safety cap
 4. Confirms missing items via one product-page soft-delete check
-5. Writes lean JSON (`schema_version: pcpmf_listing_catalog_v1`)
-6. Optionally pushes those files to a **private** staging repository
-7. Optionally triggers a private “bridge” workflow to consume staged JSON
+5. Supports a PDP-only backfill for existing incomplete rows
+6. Writes lean JSON (`schema_version: pcpmf_listing_catalog_v1`)
+7. Optionally pushes those files to a **private** staging repository
+8. Optionally triggers a private “bridge” workflow to consume staged JSON
 
 ## What it must never do
 
@@ -64,7 +65,9 @@ Store object fields (JSON):
 | `max_pages` | Optional hard cap |
 | `enrich_mode` | `targeted` for new/incomplete orchestration; empty for listing-only manual runs |
 | `enrichment_state_blob` | Compressed private runtime state containing known and eligible IDs/URLs |
-| `enrich_limit` | Optional cap for eligible PDP calls; `0` means all eligible targets |
+| `enrich_limit` | Cap for eligible PDP calls; `0` means all eligible targets |
+| `pdp_only` | Process existing `enrich_items` without fetching listing pages |
+| `enrich_items` | Existing item rows supplied by the private orchestrator for PDP-only backfill |
 | `missing_targets` | Previously missing `{merchant_item_id, product_url}` rows eligible for one check |
 | `card_selector` | CSS selector for one product card |
 | `id_attribute` / `id_regex` | Where the stable shop item id is found |
