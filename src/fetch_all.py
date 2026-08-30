@@ -86,7 +86,7 @@ def stores_from_json(path: Path) -> list[dict]:
         row_out["listing_url_template"] = template
         row_out["platform"] = str(row.get("platform") or "listing_html").strip() or "listing_html"
         row_out["enabled"] = bool(row.get("enabled", True))
-        state_blob = str(row_out.pop("enrichment_state_blob") or "").strip()
+        state_blob = str(row_out.pop("enrichment_state_blob", "") or "").strip()
         if state_blob:
             state = _unpack_enrichment_state(state_blob)
             for field in ("known_item_ids", "enrich_item_ids", "missing_targets", "enrich_items"):
