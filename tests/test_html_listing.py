@@ -92,6 +92,16 @@ class HtmlListingParserTests(unittest.TestCase):
         self.assertTrue(deleted["raw_payload"]["soft_deleted"])
         self.assertEqual(deleted["availability"], "out_of_stock")
 
+    def test_same_url_without_product_markup_is_retryable_parse_error(self):
+        blocked = html_listing.parse_pdp_html(
+            "<html><body><h1>Checking your browser</h1></body></html>",
+            requested_url="https://example.invalid/item/ex-1",
+            final_url="https://example.invalid/item/ex-1",
+        )
+        self.assertFalse(blocked["raw_payload"]["soft_deleted"])
+        self.assertEqual(blocked["raw_payload"]["pdp_parse_error"], "product_markers_not_found")
+        self.assertIsNone(blocked["availability"])
+
     def test_pdp_visible_vedant_labels(self):
         product = """
         <html><body>

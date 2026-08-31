@@ -231,6 +231,17 @@ def fetch_store_pdp_enrichment(store: dict) -> tuple[list[dict[str, Any]], dict[
                 delay_max=float(_num(store.get("delay_seconds_max"), 3.5) or 3.5),
             )
             if status != 200:
+                if status in {404, 410}:
+                    item["availability"] = "out_of_stock"
+                    raw_payload["listing_pdp_status"] = "gone"
+                    raw_payload["listing_pdp_error"] = ""
+                    raw_payload["listing_pdp_checked"] = True
+                    stats["enriched"] += 1
+                    stats["enrichment_succeeded"] += 1
+                    stats["marked_gone"] += 1
+                    stats["brand_missing"] += 1 if not item.get("brand") else 0
+                    log(f"  pdp-only gone HTTP {status} {url}")
+                    continue
                 raw_payload["listing_pdp_status"] = (
                     "retryable_error" if status in {429, 500, 502, 503, 504} else "error"
                 )
@@ -245,8 +256,15 @@ def fetch_store_pdp_enrichment(store: dict) -> tuple[list[dict[str, Any]], dict[
                 final_url=final_url,
                 config=store,
             )
-            raw_payload["pdp"] = pdp.get("raw_payload") or {}
-            if pdp.get("raw_payload", {}).get("soft_deleted"):
+            pdp_raw = pdp.get("raw_payload") or {}
+            raw_payload["pdp"] = pdp_raw
+            if pdp_raw.get("pdp_parse_error"):
+                raw_payload["listing_pdp_status"] = "error"
+                raw_payload["listing_pdp_error"] = "PDP product markers were not found"
+                stats["enrichment_errors"] += 1
+                log(f"  pdp-only unreadable product page {url}", error=True)
+                continue
+            if pdp_raw.get("soft_deleted"):
                 item["availability"] = "out_of_stock"
                 raw_payload["listing_pdp_status"] = "gone"
                 stats["marked_gone"] += 1
@@ -420,6 +438,18 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
             try:
                 status, final_url, html = fetch_html(url, delay_min=delay_min, delay_max=delay_max)
                 if status != 200:
+                    if status in {404, 410}:
+                        item["availability"] = "out_of_stock"
+                        item["raw_payload"]["enrich_gone"] = True
+                        item["raw_payload"]["listing_pdp_status"] = "gone"
+                        item["raw_payload"]["listing_pdp_error"] = ""
+                        item["raw_payload"]["listing_pdp_checked"] = True
+                        stats["enriched"] += 1
+                        stats["enrichment_succeeded"] += 1
+                        stats["marked_gone"] += 1
+                        stats["brand_missing"] += 1 if not item.get("brand") else 0
+                        log(f"  enrich gone HTTP {status} {url}")
+                        continue
                     item["raw_payload"]["listing_pdp_status"] = (
                         "retryable_error" if status in {429, 500, 502, 503, 504} else "error"
                     )
@@ -430,8 +460,15 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                 pdp = parser.parse_pdp_html(
                     html, requested_url=url, final_url=final_url, config=store
                 )
-                item["raw_payload"]["pdp"] = pdp.get("raw_payload") or {}
-                if pdp.get("raw_payload", {}).get("soft_deleted"):
+                pdp_raw = pdp.get("raw_payload") or {}
+                item["raw_payload"]["pdp"] = pdp_raw
+                if pdp_raw.get("pdp_parse_error"):
+                    item["raw_payload"]["listing_pdp_status"] = "error"
+                    item["raw_payload"]["listing_pdp_error"] = "PDP product markers were not found"
+                    stats["enrichment_errors"] += 1
+                    log(f"  enrich unreadable product page {url}", error=True)
+                    continue
+                if pdp_raw.get("soft_deleted"):
                     item["availability"] = "out_of_stock"
                     item["raw_payload"]["enrich_gone"] = True
                     item["raw_payload"]["listing_pdp_status"] = "gone"
@@ -491,6 +528,9 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                 )
                 if not isinstance(pdp.get("raw_payload"), dict):
                     pdp["raw_payload"] = {}
+                if pdp["raw_payload"].get("pdp_parse_error"):
+                    log(f"  confirm_missing unreadable product page {url}", error=True)
+                    continue
                 pdp["raw_payload"]["listing_missing_pdp_checked"] = True
                 is_gone = (
                     status == 404

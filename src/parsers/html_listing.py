@@ -306,8 +306,9 @@ def parse_pdp_html(
             ["[itemtype*='Product']", "#product", ".product-info", ".product-details"],
         )
     ):
-        raw.update({"soft_deleted": True, "gone": True})
-        item["availability"] = "out_of_stock"
+        # A same-URL response without product markup can be a temporary
+        # block/challenge page. It is not safe to call that a removed product.
+        raw.update({"soft_deleted": False, "pdp_parse_error": "product_markers_not_found"})
         item["raw_payload"] = raw
         return finalize_item(item)
 
