@@ -37,6 +37,14 @@ def _int(value: Any, fallback: int) -> int:
         return fallback
 
 
+def _pdp_metadata_status(item: dict[str, Any]) -> str:
+    """Return status using only required mapping fields."""
+    for field in ("brand", "mpn", "title"):
+        if not str(item.get(field) or "").strip():
+            return f"missing_{field}"
+    return "complete"
+
+
 def _unpack_enrichment_state(blob: str) -> dict[str, Any]:
     padding = "=" * (-len(blob) % 4)
     try:
@@ -246,9 +254,7 @@ def fetch_store_pdp_enrichment(store: dict) -> tuple[list[dict[str, Any]], dict[
                 for field in ("mpn", "brand", "title", "gtin", "ean", "upc"):
                     if pdp.get(field) and not item.get(field):
                         item[field] = pdp[field]
-                raw_payload["listing_pdp_status"] = (
-                    "complete" if item.get("brand") else "missing_brand"
-                )
+                raw_payload["listing_pdp_status"] = _pdp_metadata_status(item)
             raw_payload["listing_pdp_error"] = ""
             raw_payload["listing_pdp_checked"] = True
             stats["enriched"] += 1
@@ -438,9 +444,7 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                         from .normalize import finalize_item
 
                         finalize_item(item)
-                    item["raw_payload"]["listing_pdp_status"] = (
-                        "complete" if item.get("brand") else "missing_brand"
-                    )
+                    item["raw_payload"]["listing_pdp_status"] = _pdp_metadata_status(item)
                 item["raw_payload"]["listing_pdp_error"] = ""
                 item["raw_payload"]["listing_pdp_checked"] = True
                 enriched += 1
