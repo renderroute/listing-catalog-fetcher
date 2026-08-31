@@ -18,6 +18,7 @@ from .normalize import item_is_usable
 from .parsers import resolve_parser
 
 ROOT = Path(__file__).resolve().parents[1]
+PDP_MAX_ATTEMPTS = 3
 
 
 def log(msg: str, *, error: bool = False) -> None:
@@ -97,7 +98,13 @@ def stores_from_json(path: Path) -> list[dict]:
         state_blob = str(row_out.pop("enrichment_state_blob", "") or "").strip()
         if state_blob:
             state = _unpack_enrichment_state(state_blob)
-            for field in ("known_item_ids", "enrich_item_ids", "missing_targets", "enrich_items"):
+            for field in (
+                "known_item_ids",
+                "enrich_item_ids",
+                "enrich_item_attempts",
+                "missing_targets",
+                "enrich_items",
+            ):
                 row_out[field] = state.get(field) or []
         out.append(row_out)
     return out
@@ -153,6 +160,26 @@ def _dedupe_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _missing_check_error_stub(
+    merchant_item_id: str,
+    product_url: str,
+    attempts: int,
+    status: str,
+    error: str,
+) -> dict[str, Any]:
+    return {
+        "merchant_item_id": merchant_item_id,
+        "product_url": product_url,
+        "availability": None,
+        "raw_payload": {
+            "listing_missing_check_only": True,
+            "listing_pdp_attempts": attempts,
+            "listing_pdp_status": status,
+            "listing_pdp_error": error[:500],
+        },
+    }
+
+
 def fetch_store_pdp_enrichment(store: dict) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Enrich existing WordPress rows without fetching listing pages."""
     parser = resolve_parser(store)
@@ -160,6 +187,13 @@ def fetch_store_pdp_enrichment(store: dict) -> tuple[list[dict[str, Any]], dict[
     candidates = store.get("enrich_items") or []
     if not isinstance(candidates, list):
         candidates = []
+    candidate_attempts = {
+        str(row.get("merchant_item_id") or "").strip(): _int(
+            row.get("listing_pdp_attempts"), 0
+        )
+        for row in candidates
+        if isinstance(row, dict)
+    }
 
     items: list[dict[str, Any]] = []
     for row in candidates:
@@ -194,6 +228,8 @@ def fetch_store_pdp_enrichment(store: dict) -> tuple[list[dict[str, Any]], dict[
             except json.JSONDecodeError:
                 pass
         if item["merchant_item_id"] and item["product_url"]:
+            if candidate_attempts.get(item["merchant_item_id"], 0) >= PDP_MAX_ATTEMPTS:
+                continue
             items.append(item)
 
     limit = _int(store.get("enrich_limit"), 0)
@@ -223,6 +259,10 @@ def fetch_store_pdp_enrichment(store: dict) -> tuple[list[dict[str, Any]], dict[
         url = str(item.get("product_url") or "").strip()
         raw_payload = item.setdefault("raw_payload", {})
         raw_payload["listing_pdp_only"] = True
+        raw_payload["listing_pdp_attempts"] = (
+            candidate_attempts.get(str(item.get("merchant_item_id") or "").strip(), 0)
+            + 1
+        )
         stats["enrichment_attempted"] += 1
         try:
             status, final_url, html = fetch_html(
@@ -324,6 +364,9 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
         for value in (store.get("enrich_item_ids") or [])
         if str(value).strip()
     }
+    enrich_item_attempts = store.get("enrich_item_attempts") or {}
+    if not isinstance(enrich_item_attempts, dict):
+        enrich_item_attempts = {}
     delay_min = float(_num(store.get("delay_seconds_min"), 1.5) or 1.5)
     delay_max = float(_num(store.get("delay_seconds_max"), 3.5) or 3.5)
 
@@ -412,6 +455,10 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                 str(i.get("merchant_item_id") or "").strip() not in known_item_ids
                 or str(i.get("merchant_item_id") or "").strip() in enrich_item_ids
             )
+            and _int(
+                enrich_item_attempts.get(str(i.get("merchant_item_id") or "").strip()),
+                0,
+            ) < PDP_MAX_ATTEMPTS
         ]
         stats["new_items"] = sum(
             1 for i in items
@@ -434,6 +481,10 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                 continue
             if not isinstance(item.get("raw_payload"), dict):
                 item["raw_payload"] = {}
+            item["raw_payload"]["listing_pdp_attempts"] = _int(
+                enrich_item_attempts.get(str(item.get("merchant_item_id") or "").strip()),
+                0,
+            ) + 1
             stats["enrichment_attempted"] += 1
             try:
                 status, final_url, html = fetch_html(url, delay_min=delay_min, delay_max=delay_max)
@@ -523,15 +574,44 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
             try:
                 status, final_url, html = fetch_html(url, delay_min=delay_min, delay_max=delay_max)
                 checked += 1
+                attempts = _int(row.get("listing_pdp_attempts"), 0) + 1
+                if status in {404, 410}:
+                    items.append(
+                        _missing_check_error_stub(
+                            mid,
+                            url,
+                            attempts,
+                            "gone",
+                            "",
+                        )
+                    )
+                    items[-1]["availability"] = "out_of_stock"
+                    items[-1]["raw_payload"]["listing_missing_pdp_checked"] = True
+                    items[-1]["raw_payload"]["listing_pdp_checked"] = True
+                    gone += 1
+                    continue
                 pdp = parser.parse_pdp_html(
                     html, requested_url=url, final_url=final_url, config=store
                 )
                 if not isinstance(pdp.get("raw_payload"), dict):
                     pdp["raw_payload"] = {}
                 if pdp["raw_payload"].get("pdp_parse_error"):
+                    pdp["merchant_item_id"] = mid
+                    pdp["product_url"] = url
+                    pdp["raw_payload"].update(
+                        {
+                            "listing_missing_check_only": True,
+                            "listing_pdp_attempts": attempts,
+                            "listing_pdp_status": "error",
+                            "listing_pdp_error": "PDP product markers were not found",
+                        }
+                    )
+                    items.append(pdp)
                     log(f"  confirm_missing unreadable product page {url}", error=True)
                     continue
                 pdp["raw_payload"]["listing_missing_pdp_checked"] = True
+                pdp["raw_payload"]["listing_pdp_checked"] = True
+                pdp["raw_payload"]["listing_pdp_attempts"] = attempts
                 is_gone = (
                     status == 404
                     or pdp.get("raw_payload", {}).get("soft_deleted")
@@ -547,6 +627,18 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                     stub["availability"] = "out_of_stock"
                 items.append(stub)
             except Exception as exc:
+                attempts = _int(row.get("listing_pdp_attempts"), 0) + 1
+                message = str(exc)[:500]
+                status = "retryable_error" if re.search(r"\bHTTP\s+(?:429|5\d{2})\b", message, re.I) else "error"
+                items.append(
+                    _missing_check_error_stub(
+                        mid,
+                        url,
+                        attempts,
+                        status,
+                        message,
+                    )
+                )
                 log(f"  confirm_missing error {url}: {exc}", error=True)
         stats["missing_checked"] = checked
         stats["marked_gone"] = gone
