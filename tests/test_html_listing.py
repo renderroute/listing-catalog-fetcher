@@ -145,6 +145,38 @@ class HtmlListingParserTests(unittest.TestCase):
         self.assertEqual(parsed["mpn"], "GV-N5080GAMING-OC-16GD")
         self.assertEqual(parsed["availability"], "in_stock")
 
+    def test_inverted_price_old_new_prefers_current_new_price(self):
+        """Vedant-style inverted markup: price-new current, price-old struck but lower."""
+        html = """
+        <div class="product-layout" data-product-id="8287">
+          <div class="caption"><div class="name"><a href="/zotac-5070-ti">Zotac RTX 5070 Ti</a></div></div>
+          <div class="price">
+            <span class="price-new">₹168,000.00</span>
+            <span class="price-old">₹139,675.00</span>
+          </div>
+        </div>
+        """
+        config = {
+            "card_selector": "div.product-layout[data-product-id]",
+            "id_attribute": "data-product-id",
+            "title_selectors": [".name a"],
+            "url_selectors": [".name a"],
+            "regular_price_selectors": [".price-old"],
+            "sale_price_selectors": [".price-new"],
+            "min_page1_items": 1,
+        }
+        items, meta = html_listing.parse_listing_html(
+            html, "https://example.invalid/search?page=1", config
+        )
+        self.assertEqual(meta["cards_found"], 1)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["effective_price"], 168000.0)
+        self.assertEqual(items[0]["price"], 168000.0)
+        self.assertIsNone(items[0]["sale_price"])
+        self.assertTrue(items[0]["raw_payload"].get("price_inverted_markup"))
+        self.assertEqual(items[0]["raw_payload"].get("price_regular_raw"), 139675.0)
+        self.assertEqual(items[0]["raw_payload"].get("price_sale_raw"), 168000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

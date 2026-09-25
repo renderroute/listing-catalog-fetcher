@@ -60,11 +60,27 @@ def empty_item() -> dict[str, Any]:
 
 
 def finalize_item(item: dict[str, Any]) -> dict[str, Any]:
-    """Fill effective_price and normalize availability."""
+    """Fill effective_price and normalize availability.
+
+    OpenCart-style cards map current price to sale/new and MRP to regular/old.
+    When sale/new is not lower than regular/old (inverted or broken markup),
+    prefer sale/new as the current price and drop the fake discount. This was
+    seen on Vedant cards where price-old was struck through but lower than
+    price-new (e.g. ₹139,675 struck, ₹168,000 current).
+    """
     price = item.get("price")
     sale = item.get("sale_price")
     if sale is not None and price is not None and sale < price:
         item["effective_price"] = sale
+    elif sale is not None and price is not None and sale >= price:
+        item["effective_price"] = sale
+        item["price"] = sale
+        item["sale_price"] = None
+        raw = item.get("raw_payload")
+        if isinstance(raw, dict):
+            raw["price_inverted_markup"] = True
+            raw["price_regular_raw"] = price
+            raw["price_sale_raw"] = sale
     elif sale is not None and price is None:
         item["effective_price"] = sale
         item["price"] = sale
