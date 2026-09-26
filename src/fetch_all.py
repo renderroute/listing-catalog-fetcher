@@ -10,7 +10,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from . import build_envelope
 from .http_fetch import fetch_html, polite_delay
@@ -38,9 +38,13 @@ def _int(value: Any, fallback: int) -> int:
         return fallback
 
 
-def _pdp_metadata_status(item: dict[str, Any]) -> str:
-    """Return status using only required mapping fields."""
-    for field in ("brand", "mpn", "title"):
+def _pdp_metadata_status(item: dict[str, Any], store: Optional[dict[str, Any]] = None) -> str:
+    """Return status using required mapping fields (MPN optional when unreliable)."""
+    store = store or {}
+    required = ["brand", "title"]
+    if not store.get("mpn_unreliable"):
+        required.insert(1, "mpn")
+    for field in required:
         if not str(item.get(field) or "").strip():
             return f"missing_{field}"
     return "complete"
@@ -312,7 +316,7 @@ def fetch_store_pdp_enrichment(store: dict) -> tuple[list[dict[str, Any]], dict[
                 for field in ("mpn", "brand", "title", "gtin", "ean", "upc"):
                     if pdp.get(field) and not item.get(field):
                         item[field] = pdp[field]
-                raw_payload["listing_pdp_status"] = _pdp_metadata_status(item)
+                raw_payload["listing_pdp_status"] = _pdp_metadata_status(item, store)
             raw_payload["listing_pdp_error"] = ""
             raw_payload["listing_pdp_checked"] = True
             stats["enriched"] += 1
@@ -532,7 +536,7 @@ def fetch_store_listings(store: dict) -> tuple[list[dict[str, Any]], dict[str, A
                         from .normalize import finalize_item
 
                         finalize_item(item)
-                    item["raw_payload"]["listing_pdp_status"] = _pdp_metadata_status(item)
+                    item["raw_payload"]["listing_pdp_status"] = _pdp_metadata_status(item, store)
                 item["raw_payload"]["listing_pdp_error"] = ""
                 item["raw_payload"]["listing_pdp_checked"] = True
                 enriched += 1

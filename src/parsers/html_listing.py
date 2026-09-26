@@ -113,7 +113,22 @@ def _prices_from_card(card, config: dict) -> tuple[Optional[float], Optional[flo
     return _price_from_selectors(card, _list(config, "price_selectors", DEFAULT_PRICE_SELECTORS)), None
 
 
+def _apply_mpn_reject(value: Optional[str], config: dict) -> Optional[str]:
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    reject = str(config.get("mpn_reject_regex") or "").strip()
+    if reject and re.search(reject, value, re.I):
+        return None
+    return value
+
+
 def _mpn_from_card(card, config: dict) -> Optional[str]:
+    selectors = config.get("mpn_selectors")
+    if isinstance(selectors, list) and len(selectors) == 0:
+        return None
     element = _first(card, _list(config, "mpn_selectors", DEFAULT_MPN_SELECTORS))
     if not element:
         return None
@@ -123,7 +138,24 @@ def _mpn_from_card(card, config: dict) -> Optional[str]:
         match = re.search(pattern, value, re.I)
         if match:
             value = match.group(1) if match.groups() else match.group(0)
-    return value.strip() if value else None
+    return _apply_mpn_reject(value, config)
+
+
+def _brand_from_card(card, config: dict) -> Optional[str]:
+    selectors = config.get("brand_selectors")
+    if not isinstance(selectors, list) or not selectors:
+        return None
+    element = _first(card, [str(x) for x in selectors if str(x).strip()])
+    value = _text(element)
+    if not value:
+        return None
+    pattern = str(config.get("brand_regex") or "").strip()
+    if pattern:
+        match = re.search(pattern, value, re.I)
+        if match:
+            value = match.group(1) if match.groups() else match.group(0)
+    value = re.sub(r"^(?:Brand)\s*[:\-]?\s*", "", value, flags=re.I).strip()
+    return value or None
 
 
 def _availability_from_card(card, config: dict) -> Optional[str]:
@@ -137,6 +169,8 @@ def _availability_from_card(card, config: dict) -> Optional[str]:
     if "out of stock" in text or "coming soon" in text or "unavailable" in text:
         return "out_of_stock"
     if "in stock" in text or "available" in text:
+        return "in_stock"
+    if config.get("assume_in_stock_unless_oos"):
         return "in_stock"
     return None
 
@@ -160,6 +194,7 @@ def parse_listing_html(
         item["title"] = _text(title_element)
         item["product_url"] = clean_product_url(urljoin(page_url, href) if href else None)
         item["image_url"] = _image_from_card(card, page_url, config)
+        item["brand"] = _brand_from_card(card, config)
         item["mpn"] = _mpn_from_card(card, config)
         item["price"] = regular
         item["sale_price"] = sale
@@ -318,7 +353,7 @@ def parse_pdp_html(
         item["brand"] = _brand_from_ld(node)
         item["product_type"] = _ld_text(node, ("category",))
         model = _ld_text(node, ("model",))
-        item["mpn"] = _ld_text(node, ("mpn", "model", "sku"))
+        item["mpn"] = _apply_mpn_reject(_ld_text(node, ("mpn", "model", "sku")), config)
         item["gtin"] = _ld_text(node, ("gtin", "gtin14"))
         item["ean"] = _ld_text(node, ("ean", "gtin13"))
         item["upc"] = _ld_text(node, ("upc", "gtin12"))
@@ -353,12 +388,18 @@ def parse_pdp_html(
             if match:
                 value = (match.group(1) if match.groups() else match.group(0)).strip()
                 if value:
-                    item[field] = value
-                    raw[f"{field}_text"] = value
+                    if field == "mpn":
+                        value = _apply_mpn_reject(value, config)
+                    if value:
+                        item[field] = value
+                        raw[f"{field}_text"] = value
     if not item.get("brand"):
         item["brand"] = _label_value(page_text, ("Brand",))
     if not item.get("mpn"):
-        item["mpn"] = _label_value(page_text, ("Model", "MPN", "Product Code", "SKU"))
+        item["mpn"] = _apply_mpn_reject(
+            _label_value(page_text, ("Model", "MPN", "Product Code", "SKU")),
+            config,
+        )
     if not item.get("upc"):
         item["upc"] = _label_value(page_text, ("UPC",))
     if not item.get("ean"):

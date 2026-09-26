@@ -177,6 +177,80 @@ class HtmlListingParserTests(unittest.TestCase):
         self.assertEqual(items[0]["raw_payload"].get("price_regular_raw"), 139675.0)
         self.assertEqual(items[0]["raw_payload"].get("price_sale_raw"), 168000.0)
 
+    def test_theitdepot_style_listing_brand_stock_and_mpn_reject(self):
+        html = """
+        <div class="product-layout" data-product-id="3666">
+          <div class="caption">
+            <div class="stats">
+              <span class="stat-1"><span class="stats-label">Brand:</span> <span><a href="/brand">Acer</a></span></span>
+              <span class="stat-2"><span class="stats-label">Model:</span> <span>TID3666</span></span>
+            </div>
+            <div class="name"><a href="/acer_ek220q">Acer 21.5-inch Full HD Monitor (EK220Q)</a></div>
+            <div class="price"><span class="price-new">₹5,895.00</span> <span class="price-old">₹14,999.00</span></div>
+          </div>
+          <div class="product-labels"><span class="product-label">-61%</span></div>
+        </div>
+        <div class="product-layout" data-product-id="3867">
+          <div class="caption">
+            <div class="stats">
+              <span class="stat-1"><span class="stats-label">Brand:</span> <span><a href="/brand">Acer</a></span></span>
+              <span class="stat-2"><span class="stats-label">Model:</span> <span>TID3867</span></span>
+            </div>
+            <div class="name"><a href="/acer_cb242y">Acer 24 inch CB242Y Widescreen LCD Monitor</a></div>
+            <div class="price"><span class="price-new">₹10,505.00</span> <span class="price-old">₹23,999.00</span></div>
+          </div>
+          <div class="product-labels"><span class="product-label">Out Of Stock</span></div>
+        </div>
+        """
+        config = {
+            "card_selector": "div.product-layout[data-product-id]",
+            "id_attribute": "data-product-id",
+            "title_selectors": [".name a"],
+            "url_selectors": [".name a"],
+            "regular_price_selectors": [".price-old"],
+            "sale_price_selectors": [".price-new"],
+            "brand_selectors": [".stat-1 a", ".stat-1"],
+            "mpn_selectors": [],
+            "mpn_reject_regex": r"^TID\d+$",
+            "mpn_unreliable": True,
+            "assume_in_stock_unless_oos": True,
+            "stock_selectors": [".product-labels", ".product-label"],
+            "min_page1_items": 1,
+        }
+        items, meta = html_listing.parse_listing_html(
+            html, "https://example.invalid/search?page=1", config
+        )
+        self.assertEqual(meta["cards_found"], 2)
+        self.assertEqual(items[0]["brand"], "Acer")
+        self.assertIsNone(items[0]["mpn"])
+        self.assertEqual(items[0]["availability"], "in_stock")
+        self.assertEqual(items[0]["effective_price"], 5895.0)
+        self.assertEqual(items[1]["availability"], "out_of_stock")
+
+    def test_pdp_rejects_tid_internal_model_as_mpn(self):
+        product = """
+        <html><head>
+          <script type="application/ld+json">
+          {"@type":"Product","name":"Acer Monitor","brand":{"name":"Acer"},
+           "model":"TID3666","mpn":"",
+           "offers":{"price":"5895","availability":"https://schema.org/InStock"}}
+          </script>
+        </head><body>
+          <h1>Acer Monitor</h1>
+          <div>Brand: Acer</div>
+          <div>Model: TID3666</div>
+        </body></html>
+        """
+        parsed = html_listing.parse_pdp_html(
+            product,
+            requested_url="https://example.invalid/acer",
+            final_url="https://example.invalid/acer",
+            config={"mpn_reject_regex": r"^TID\d+$", "mpn_unreliable": True},
+        )
+        self.assertEqual(parsed["brand"], "Acer")
+        self.assertIsNone(parsed["mpn"])
+        self.assertEqual(parsed["effective_price"], 5895.0)
+
 
 if __name__ == "__main__":
     unittest.main()
