@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from . import build_envelope
 from .http_fetch import fetch_html, polite_delay
+from .relay import used_relay
 from .normalize import item_is_usable
 from .parsers import resolve_parser
 
@@ -713,6 +714,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if bool(store.get("pdp_only")):
                     envelope["listing_pdp_only"] = True
+                fetched_via = used_relay(str(store.get("listing_url_template") or ""))
+                if fetched_via:
+                    # "relay" (always-relay shop) or "relay_backup" (403 direct, relay worked)
+                    envelope["fetched_via"] = fetched_via
+                    log(f"  {key}: fetched via {fetched_via}")
                 if not args.dry_run:
                     path = out_dir / f"{key}.json"
                     path.write_text(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
