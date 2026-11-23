@@ -231,6 +231,10 @@ jobs:
 
       - name: Fetch listings
         id: fetch
+        env:
+          FETCH_RELAY_URL: ${{ secrets.FETCH_RELAY_URL }}
+          FETCH_RELAY_KEY: ${{ secrets.FETCH_RELAY_KEY }}
+          FETCH_RELAY_HOSTS: ${{ secrets.FETCH_RELAY_HOSTS }}
         run: |
           set -euo pipefail
           MODE="${{ steps.prep.outputs.mode }}"
